@@ -1,53 +1,50 @@
-# Use Node.js 16 for better ffi-napi compatibility
-FROM node:16-bullseye AS development
+# Etapa 1: Builder
+FROM node:16-bullseye AS builder
 
 WORKDIR /usr/src/app
 
-# Install build dependencies
+# Dependencias de build para vosk
 RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
     build-essential \
+    wget \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
-COPY package*.json ./
+# Descargar modelo small de español
+RUN wget https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip \
+    && unzip vosk-model-small-es-0.42.zip \
+    && mv vosk-model-small-es-0.42 model \
+    && rm vosk-model-small-es-0.42.zip
 
+# Instalar dependencias
+COPY package*.json ./
 RUN npm ci && npm cache clean --force
 
-###################
-# BUILD FOR PRODUCTION
-###################
+# Copiar aplicación
+COPY index.js ./
 
-FROM node:16-bullseye AS build
-
-WORKDIR /usr/src/app
-
-COPY --chown=node:node --from=development /usr/src/app/node_modules ./node_modules
-
-COPY --chown=node:node index.js index.js
-
-USER node
-
-CMD [ "node", "index.js" ]
-
-###################
-# PRODUCTION - Use same base image (Debian) for compatibility
-###################
-
+# Etapa 2: Runtime
 FROM node:16-bullseye-slim AS production
 
 WORKDIR /usr/src/app
 
-# Install only runtime dependencies needed for vosk
+# Instalar dependencias de runtime
 RUN apt-get update && apt-get install -y \
     libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy built node_modules and application files from build stage
-COPY --chown=node:node --from=build /usr/src/app/node_modules ./node_modules
-COPY --chown=node:node --from=build /usr/src/app/index.js ./index.js
-COPY --chown=node:node --from=build /usr/src/app/package*.json ./
+COPY --from=builder /usr/src/app/node_modules ./node_modules
+COPY --from=builder /usr/src/app/index.js ./index.js
+COPY --from=builder /usr/src/app/package*.json ./
+COPY --from=builder /usr/src/app/model ./model
+
+ENV NODE_ENV=production
+ENV MODEL_PATH=/usr/src/app/model
+
+EXPOSE 6010
 
 USER node
 
-CMD [ "node", "index.js" ]
+CMD ["node", "index.js"]
