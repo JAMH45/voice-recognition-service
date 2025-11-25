@@ -11,9 +11,10 @@
     "dc:push": "docker push agentvoiceresponse/avr-asr-vosk:latest && docker push agentvoiceresponse/avr-asr-vosk:${npm_package_version}"
   },
   "dependencies": {
-    "dotenv": "^16.4.5",
+    "dotenv": "^16.6.1",
     "express": "^4.21.0",
-    "vosk": "^0.3.39"
+    "vosk": "^0.3.39",
+    "ws": "^8.18.3"
   },
   "devDependencies": {
     "nodemon": "^3.1.7"

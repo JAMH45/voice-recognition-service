@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Prueba Vosk WebSocket (Safari/Brave)</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 20px auto;
+    }
+    .controls {
+      margin-bottom: 15px;
+    }
+    button {
+      margin-right: 10px;
+      padding: 8px 16px;
+    }
+    #textoUsuario {
+      display: inline-block;
+      min-height: 30px;
+      padding: 8px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      width: 100%;
+      box-sizing: border-box;
+      font-size: 18px;
+    }
+    #estado, #log {
+      font-size: 14px;
+      white-space: pre-line;
+    }
+    #estado {
+      margin-top: 10px;
+      font-weight: bold;
+    }
+    #log {
+      margin-top: 10px;
+      padding: 8px;
+      border: 1px dashed #ccc;
+      border-radius: 4px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+  <h1>Prueba</h1>
+
+  <div class="controls">
+    <button id="btnConectar">Conectar WS</button>
+    <button id="btnIniciar" disabled>Iniciar micrófono</button>
+    <button id="btnDetener" disabled>Detener micrófono</button>
+  </div>
+
+  <h3>Texto reconocido:</h3>
+  <span id="textoUsuario"></span>
+
+  <div id="estado">Estado: desconectado</div>
+  <div id="log"></div>
+
+  <script>
+    const WS_URL = "ws://localhost:6010/stt";
+
+    const btnConectar = document.getElementById("btnConectar");
+    const btnIniciar = document.getElementById("btnIniciar");
+    const btnDetener = document.getElementById("btnDetener");
+    const spanTexto = document.getElementById("textoUsuario");
+    const estado = document.getElementById("estado");
+    const log = document.getElementById("log");
+
+    let ws = null;
+    let audioContext = null;
+    let mediaStream = null;
+    let sourceNode = null;
+    let processorNode = null;
+    let isRecording = false;
+
+    function logMsg(msg) {
+      console.log(msg);
+      log.textContent += msg + "\n";
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function setEstado(text) {
+      estado.textContent = "Estado: " + text;
+    }
+
+    // Convierte Float32 [-1,1] a Int16 PCM (little-endian)
+    function floatTo16BitPCM(float32Array) {
+      const buffer = new ArrayBuffer(float32Array.length * 2);
+      const view = new DataView(buffer);
+      for (let i = 0; i < float32Array.length; i++) {
+        let s = Math.max(-1, Math.min(1, float32Array[i]));
+        view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      }
+      return buffer;
+    }
+
+    // Conectar WebSocket
+    btnConectar.addEventListener("click", () => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        logMsg("WS ya está conectado.");
+        return;
+      }
+
+      ws = new WebSocket(WS_URL);
+      ws.binaryType = "arraybuffer";
+
+      ws.onopen = () => {
+        logMsg("WS conectado a " + WS_URL);
+        setEstado("WS conectado (micrófono detenido)");
+        btnIniciar.disabled = false;
+        btnDetener.disabled = true;
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+
+          if (data.type === "partial" || data.type === "final") {
+            spanTexto.textContent = data.text;
+          } else if (data.type === "error") {
+            logMsg("Error desde servidor: " + data.error);
+          } else {
+            logMsg("Mensaje desconocido: " + event.data);
+          }
+        } catch (e) {
+          logMsg("Mensaje no JSON: " + event.data);
+        }
+      };
+
+      ws.onerror = (err) => {
+        console.error("WS error:", err);
+        logMsg("WS error (ver consola).");
+        setEstado("Error en WS");
+      };
+
+      ws.onclose = () => {
+        logMsg("WS cerrado.");
+        setEstado("desconectado");
+        btnIniciar.disabled = true;
+        btnDetener.disabled = true;
+        ws = null;
+      };
+    });
+
+    // Iniciar captación de micrófono
+    btnIniciar.addEventListener("click", async () => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        logMsg("Debes conectar el WS primero.");
+        return;
+      }
+
+      if (isRecording) {
+        logMsg("Ya estás grabando.");
+        return;
+      }
+
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+        // Safari necesita webkitAudioContext
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        audioContext = new AudioCtx();
+
+        const sampleRate = audioContext.sampleRate;
+        logMsg("SampleRate del navegador: " + sampleRate);
+
+        // Mandamos config al servidor
+        ws.send(
+          JSON.stringify({
+            type: "config",
+            sampleRate: sampleRate
+          })
+        );
+
+        sourceNode = audioContext.createMediaStreamSource(mediaStream);
+
+        // ScriptProcessorNode (deprecated, pero funciona y Safari lo soporta)
+        const bufferSize = 4096;
+        processorNode = audioContext.createScriptProcessor(bufferSize, 1, 1);
+
+        processorNode.onaudioprocess = (event) => {
+          if (!isRecording || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+          const inputData = event.inputBuffer.getChannelData(0);
+          const pcmBuffer = floatTo16BitPCM(inputData);
+          ws.send(pcmBuffer);
+        };
+
+        sourceNode.connect(processorNode);
+        processorNode.connect(audioContext.destination);
+
+        isRecording = true;
+        setEstado("grabando…");
+        btnIniciar.disabled = true;
+        btnDetener.disabled = false;
+        logMsg("Micrófono iniciado.");
+      } catch (err) {
+        console.error("Error al iniciar micrófono:", err);
+        logMsg("Error al iniciar micrófono: " + err.message);
+      }
+    });
+
+    // Detener micrófono
+    btnDetener.addEventListener("click", () => {
+      if (!isRecording) return;
+
+      isRecording = false;
+      setEstado("WS conectado (micrófono detenido)");
+      btnIniciar.disabled = false;
+      btnDetener.disabled = true;
+
+      if (processorNode) {
+        processorNode.disconnect();
+        processorNode = null;
+      }
+      if (sourceNode) {
+        sourceNode.disconnect();
+        sourceNode = null;
+      }
+      if (audioContext) {
+        audioContext.close();
+        audioContext = null;
+      }
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((t) => t.stop());
+        mediaStream = null;
+      }
+
+      logMsg("Micrófono detenido.");
+    });
+  </script>
+</body>
+</html>
